@@ -7,4 +7,8 @@ import type { IWindowOptions } from "@xterm/xterm";
 export const XTERM_SECURE_WINDOW_OPTIONS: IWindowOptions = Object.freeze({
   getIconTitle: false,
   getWinTitle: false,
+
+  getWinSizePixels: true,
+  getCellSizePixels: true,
+  getWinSizeChars: true,
 });
