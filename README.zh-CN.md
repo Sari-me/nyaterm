@@ -135,6 +135,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
 - 可选动作链接，识别 IPv4、`host:port` 和压缩包文件名
 - 可选关键词高亮，支持内置预设、自定义规则和 JSON 导入
 - 支持终端缩放、工作区 padding、字体粗细、原生输入法和图片路径粘贴
+- 支持通过 Kitty Graphics Protocol 串流在终端中显示静态图像，可运行 `kitten icat --transfer-mode=stream image.png` 体验。
 - 可直接让 AI 解释最近输出，并通过 `Terminal Output Lines` 控制 Agent 命令的终端内联输出
 - 大输出保护、可配置回滚缓冲区、SSH Keep-Alive 和会话录制
 - 可从选中文本发起在线搜索和翻译

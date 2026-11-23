@@ -125,6 +125,7 @@ NyaTerm is built for people who move between servers, local commands, devices, a
 - Optional action links for IPv4 addresses, `host:port`, and archive filenames
 - Optional keyword highlighting with expanded built-in presets, custom rules, and JSON import
 - Terminal zoom, workspace padding, font weight controls, native IME support, image path paste handling, and a clear-terminal action
+- Inline static images via Kitty Graphics Protocol streaming. Try `kitten icat --transfer-mode=stream image.png` in a NyaTerm terminal.
 - AI shortcuts for explaining recent output, plus inline Agent command output with configurable `Terminal Output Lines`
 - Large-output protection, configurable scrollback, SSH keep-alive, and session recording
 - Online search and translation from selected terminal text
