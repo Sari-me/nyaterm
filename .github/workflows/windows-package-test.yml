@@ -1,0 +1,205 @@
+name: Windows package test
+
+on:
+  push:
+    branches: [kitty-image-display-package-test]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  NYATERM_GITHUB_GIST_CLIENT_ID: ${{ vars.NYATERM_GITHUB_GIST_CLIENT_ID }}
+  # Package the exact head of the PR, not the temporary workflow commit.
+  PACKAGE_SOURCE_SHA: '2abcf5cd72fac2771154cef9fed5157b65110919'
+
+jobs:
+  package:
+    name: Package ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-x64, os: windows-2025, target: x86_64-pc-windows-msvc }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ env.PACKAGE_SOURCE_SHA }}
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read package version from the workspace
+        id: version
+        shell: bash
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate frozen package request
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ env.PACKAGE_SOURCE_SHA }}
+          VERSION: ${{ steps.version.outputs.value }}
+          ARTIFACT_VERSION: ${{ steps.version.outputs.value }}
+          RELEASE_TYPE: release
+          ARTIFACT_PREFIX: NyaTerm
+        run: |
+          python - <<'PY'
+          import os, re, subprocess, tomllib
+          sha = os.environ['SOURCE_SHA']
+          if not re.fullmatch('[0-9a-f]{40}', sha) or subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != sha:
+              raise SystemExit('package source must be the frozen checkout SHA')
+          version = tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version']
+          kind = os.environ['RELEASE_TYPE']
+          if kind not in ('release', 'snapshot') or version != os.environ['VERSION']:
+              raise SystemExit('invalid package version or release type')
+          label, prefix = ('main-snapshot', 'main-snapshot') if kind == 'snapshot' else (version, 'NyaTerm')
+          if os.environ['ARTIFACT_VERSION'] != label or os.environ['ARTIFACT_PREFIX'] != prefix:
+              raise SystemExit('package filename contract mismatch')
+          PY
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.target }}
+          cache-key: package-release-${{ matrix.target }}
+          cache-on-failure: 'true'
+          save-cache: always
+      - name: Install Android native build tools (Windows)
+        shell: pwsh
+        run: choco install llvm -y --no-progress
+      - name: Set up MSYS2 for Android native dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make
+      - name: Install NSIS
+        shell: pwsh
+        run: ./scripts/ci/install-nsis.ps1
+      - name: Install .NET for WiX
+        if: ${{ !contains(steps.version.outputs.value, '-') }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install WiX
+        if: ${{ !contains(steps.version.outputs.value, '-') }}
+        shell: pwsh
+        run: ./scripts/ci/install-wix.ps1
+      - name: Test MSI packaging contracts
+        if: ${{ !contains(steps.version.outputs.value, '-') }}
+        run: python scripts/ci/test_scripts.py --suite windows-msi
+      - name: Prepare bundled ConPTY
+        run: python scripts/release/prepare_conpty.py
+      - name: Install SPICE preparation modules
+        run: python -m pip install pefile==2024.8.26 zstandard==0.25.0 pyparsing==3.2.5
+      - name: Prepare private SPICE runtime
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts/release')
+          import prepare_spice
+          target = os.environ['TARGET']
+          runtime = prepare_spice.prepare(target)
+          prepare_spice.verify_runtime(runtime, target)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+              stream.write(f'NYATERM_SPICE_RUNTIME={runtime}\n')
+              stream.write(f'NYATERM_TEST_SPICE_RUNTIME={runtime}\n')
+          PY
+          python -m unittest scripts.tests.test_prepare_spice scripts.tests.test_spice_release_integration
+      - name: Prepare Android native dependencies (Windows MSYS2)
+        shell: msys2 {0}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/release/prepare_android.py --target "${TARGET}"
+      - name: Package native application (Windows MSVC)
+        shell: pwsh
+        env:
+          NYATERM_ARTIFACT_VERSION: ${{ steps.version.outputs.value }}
+          NYATERM_GITHUB_GIST_CLIENT_ID: ${{ vars.NYATERM_GITHUB_GIST_CLIENT_ID }}
+          NYATERM_VERSION: ${{ steps.version.outputs.value }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          # Git Bash prepends Git's /usr/bin/link.exe, shadowing MSVC's linker.
+          # Preserve the PATH configured by ilammy/msvc-dev-cmd for Rust builds.
+          $linker = (Get-Command link.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          if ($linker -notmatch '\\VC\\Tools\\MSVC\\[^\\]+\\bin\\HostX64\\(x64|arm64)\\link\.exe$') {
+            throw "Expected Visual Studio MSVC linker, got: $linker"
+          }
+          Write-Host "Using MSVC linker: $linker"
+          python scripts/release/package_native.py "$env:TARGET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload failed FFmpeg configuration log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-config-${{ matrix.label }}
+          path: target/android-deps/ffmpeg-build/**/ffbuild/config.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Test Windows FFmpeg import library links and cached repair
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/ci/test_scripts.py --suite android-ffmpeg
+      - name: Verify native package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.value }}
+          ARTIFACT_VERSION: ${{ steps.version.outputs.value }}
+        run: >-
+          python scripts/release/verify_native_package.py
+          --target "${TARGET}" --version "${VERSION}"
+          --artifact-version "${ARTIFACT_VERSION}" --dist dist
+      # Run host tests even when the package contains ARM64 executables.
+      - name: Configure MSVC for host tests
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Test portable updater against packaged ZIP
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.value }}
+          ARTIFACT_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $arch = if ($env:TARGET -eq 'aarch64-pc-windows-msvc') { 'arm64' } else { 'x64' }
+          $env:NYATERM_TEST_PORTABLE_ARCH = if ($arch -eq 'arm64') { 'aarch64' } else { 'x86_64' }
+          $env:NYATERM_TEST_PORTABLE_ARCHIVE = (Resolve-Path "dist/NyaTerm_$($env:ARTIFACT_VERSION)_windows_${arch}_portable.zip").Path
+          cargo test -p nyaterm-updater --lib --locked portable_release_archive_round_trip -- --ignored
+      - name: Record package provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ env.PACKAGE_SOURCE_SHA }}
+          VERSION: ${{ steps.version.outputs.value }}
+          ARTIFACT_VERSION: ${{ steps.version.outputs.value }}
+          TARGET: ${{ matrix.target }}
+        run: >-
+          python scripts/release/release_provenance.py record
+          --dist dist --records provenance --source-sha "${SOURCE_SHA}"
+          --version "${VERSION}" --artifact-version "${ARTIFACT_VERSION}"
+          --run-id "${GITHUB_RUN_ID}" --target "${TARGET}"
+      - name: Upload package provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-${{ matrix.label }}
+          path: provenance/*.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NyaTerm-${{ matrix.label }}
+          path: dist/*
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
